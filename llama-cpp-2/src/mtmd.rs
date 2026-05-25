@@ -757,6 +757,75 @@ impl MtmdInputChunks {
             Err(MtmdEvalError::EvalFailure(result))
         }
     }
+
+    /// Evaluate a single chunk by index, starting from position `n_past`.
+    ///
+    /// Like [`Self::eval_chunks`] but for one chunk, enabling partial prefill
+    /// (e.g. reusing a KV-cache prefix and only evaluating the differing
+    /// suffix chunks). Wraps `mtmd_helper_eval_chunk_single`.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Index of the chunk to evaluate (see [`Self::len`] / [`Self::get`])
+    /// * `mtmd_ctx` - The multimodal context
+    /// * `llama_ctx` - The LLAMA context
+    /// * `n_past` - Current position in the sequence to start from
+    /// * `seq_id` - Sequence ID for the batch
+    /// * `n_batch` - Batch size for processing
+    /// * `logits_last` - Whether to compute logits for the last token
+    ///
+    /// # Returns
+    ///
+    /// Returns the new `n_past` value (number of positions consumed so far,
+    /// i.e. `n_past` plus this chunk's positions) on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MtmdEvalError::EvalFailure` on encode/decode failure, or if
+    /// `index` is out of range.
+    ///
+    /// This function is NOT thread-safe.
+    pub fn eval_chunk(
+        &self,
+        index: usize,
+        mtmd_ctx: &MtmdContext,
+        llama_ctx: &LlamaContext,
+        n_past: llama_cpp_sys_2::llama_pos,
+        seq_id: llama_cpp_sys_2::llama_seq_id,
+        n_batch: i32,
+        logits_last: bool,
+    ) -> Result<llama_cpp_sys_2::llama_pos, MtmdEvalError> {
+        if index >= self.len() {
+            return Err(MtmdEvalError::EvalFailure(-1));
+        }
+        let chunk_ptr =
+            unsafe { llama_cpp_sys_2::mtmd_input_chunks_get(self.chunks.as_ptr(), index) };
+
+        // `mtmd_helper_eval_chunk_single`'s text branch *adds* to `*new_n_past`
+        // (`*new_n_past += text_batch.n_tokens`), so it must be pre-seeded with
+        // `n_past` — otherwise the returned position is wrong for text chunks
+        // and a subsequent chunk's `n_past` is corrupted.
+        let mut new_n_past: llama_cpp_sys_2::llama_pos = n_past;
+
+        let result = unsafe {
+            llama_cpp_sys_2::mtmd_helper_eval_chunk_single(
+                mtmd_ctx.context.as_ptr(),
+                llama_ctx.context.as_ptr(),
+                chunk_ptr,
+                n_past,
+                seq_id,
+                n_batch,
+                logits_last,
+                &raw mut new_n_past,
+            )
+        };
+
+        if result == 0 {
+            Ok(new_n_past)
+        } else {
+            Err(MtmdEvalError::EvalFailure(result))
+        }
+    }
 }
 
 impl Drop for MtmdInputChunks {
