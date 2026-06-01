@@ -4,6 +4,8 @@ use std::fmt::{Debug, Formatter};
 use std::num::NonZeroI32;
 use std::ptr::NonNull;
 use std::slice;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::llama_batch::LlamaBatch;
 use crate::model::{LlamaLoraAdapter, LlamaModel};
@@ -28,6 +30,11 @@ pub struct LlamaContext<'a> {
     pub model: &'a LlamaModel,
     initialized_logits: Vec<i32>,
     embeddings_enabled: bool,
+    /// Backing storage for the active abort flag. The compute graph polls the
+    /// raw pointer derived from this `Arc`, so the `Arc` must outlive any
+    /// pending `decode`/`encode` call. `None` means no callback is currently
+    /// installed on the underlying `llama_context`.
+    abort_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Debug for LlamaContext<'_> {
@@ -49,7 +56,48 @@ impl<'model> LlamaContext<'model> {
             model: llama_model,
             initialized_logits: Vec::new(),
             embeddings_enabled,
+            abort_flag: None,
         }
+    }
+
+    /// Install an abort flag polled by the compute graph. When `flag` is
+    /// stored as `true`, the running `decode`/`encode` aborts at the next
+    /// per-op check inside llama.cpp and returns an error (typically a
+    /// `Compute`/abort variant of `DecodeError`).
+    ///
+    /// The flag is kept owned by this context until [`clear_abort_callback`]
+    /// is called or the context is dropped, so the pointer that llama.cpp
+    /// holds remains valid for the lifetime of any in-flight call.
+    ///
+    /// Calling this replaces any previously installed flag.
+    pub fn set_abort_flag(&mut self, flag: Arc<AtomicBool>) {
+        // Derive the pointer from the stored Arc, not the argument: storing
+        // `flag` is what keeps the AtomicBool alive across this and any
+        // future `clear_abort_callback`, and both methods call
+        // `llama_set_abort_callback` before dropping their Arc, so the
+        // pointer the C side holds is never stale.
+        let stored = self.abort_flag.insert(flag);
+        let ptr = Arc::as_ptr(stored) as *mut std::os::raw::c_void;
+        unsafe {
+            llama_cpp_sys_2::llama_set_abort_callback(
+                self.context.as_ptr(),
+                Some(abort_callback_trampoline),
+                ptr,
+            );
+        }
+    }
+
+    /// Remove any previously installed abort callback. Safe to call when no
+    /// callback is installed.
+    pub fn clear_abort_callback(&mut self) {
+        unsafe {
+            llama_cpp_sys_2::llama_set_abort_callback(
+                self.context.as_ptr(),
+                None,
+                std::ptr::null_mut(),
+            );
+        }
+        self.abort_flag = None;
     }
 
     /// Gets the max number of logical tokens that can be submitted to decode. Must be greater than or equal to [`Self::n_ubatch`].
@@ -372,6 +420,22 @@ impl<'model> LlamaContext<'model> {
 
 impl Drop for LlamaContext<'_> {
     fn drop(&mut self) {
+        // Detach any installed abort callback before freeing the context so
+        // llama.cpp does not retain a dangling pointer once the Arc dies.
+        if self.abort_flag.is_some() {
+            self.clear_abort_callback();
+        }
         unsafe { llama_cpp_sys_2::llama_free(self.context.as_ptr()) }
     }
+}
+
+/// Trampoline invoked by ggml's compute scheduler between graph ops. `data`
+/// is the `*const AtomicBool` set by [`LlamaContext::set_abort_flag`]; it is
+/// kept alive by an `Arc` owned by the `LlamaContext` for the duration of
+/// the call. `data` is never null because `clear_abort_callback` clears the
+/// function-pointer slot in lockstep with the data slot.
+unsafe extern "C" fn abort_callback_trampoline(data: *mut std::os::raw::c_void) -> bool {
+    // SAFETY: see the function-level comment for the data-pointer invariant.
+    let flag = unsafe { &*(data as *const AtomicBool) };
+    flag.load(Ordering::Relaxed)
 }
