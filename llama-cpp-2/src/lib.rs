@@ -140,6 +140,9 @@ pub enum DecodeError {
     /// No kv cache slot was available.
     #[error("Decode Error 1: NoKvCacheSlot")]
     NoKvCacheSlot,
+    /// Decoding was aborted by the context abort callback.
+    #[error("Decode Error 2: Aborted")]
+    Aborted,
     /// The number of tokens in the batch was 0.
     #[error("Decode Error -1: n_tokens == 0")]
     NTokensZero,
@@ -198,6 +201,7 @@ impl From<NonZeroI32> for DecodeError {
     fn from(value: NonZeroI32) -> Self {
         match value.get() {
             1 => DecodeError::NoKvCacheSlot,
+            2 => DecodeError::Aborted,
             -1 => DecodeError::NTokensZero,
             i => DecodeError::Unknown(i),
         }
@@ -212,6 +216,19 @@ impl From<NonZeroI32> for EncodeError {
             -1 => EncodeError::NTokensZero,
             i => EncodeError::Unknown(i),
         }
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::DecodeError;
+    use std::num::NonZeroI32;
+
+    #[test]
+    fn decode_error_code_two_maps_to_aborted() {
+        let code = NonZeroI32::new(2).expect("non-zero decode error code");
+
+        assert_eq!(DecodeError::from(code), DecodeError::Aborted);
     }
 }
 
