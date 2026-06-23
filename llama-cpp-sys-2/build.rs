@@ -956,7 +956,10 @@ fn main() {
                 Ok(path) => {
                     // Skip CLI / deprecation-warning binaries — we only want the library sources
                     let filename = path.file_name().unwrap().to_str().unwrap();
-                    if filename == "mtmd-cli.cpp" || filename == "deprecation-warning.cpp" {
+                    if filename == "mtmd-cli.cpp"
+                        || filename == "mtmd-debug.cpp"
+                        || filename == "deprecation-warning.cpp"
+                    {
                         continue;
                     }
                     mtmd_build.file(&path);
