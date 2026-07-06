@@ -320,3 +320,36 @@ impl Default for LlamaContextParams {
         Self { context_params }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{LlamaContextParams, LlamaContextType};
+
+    #[test]
+    fn context_type_defaults_to_default_context() {
+        let params = LlamaContextParams::default();
+
+        assert_eq!(params.context_type(), LlamaContextType::Default);
+    }
+
+    #[test]
+    fn mtp_context_type_and_recurrent_snapshots_round_trip() {
+        let params = LlamaContextParams::default()
+            .with_context_type(LlamaContextType::Mtp)
+            .with_n_rs_seq(3)
+            .with_n_outputs_max(1);
+
+        assert_eq!(params.context_type(), LlamaContextType::Mtp);
+        assert_eq!(params.n_rs_seq(), 3);
+        assert_eq!(params.n_outputs_max(), 1);
+    }
+
+    #[test]
+    fn unknown_context_type_preserves_raw_value() {
+        let raw = llama_cpp_sys_2::LLAMA_CONTEXT_TYPE_MTP + 100;
+        let context_type = LlamaContextType::from(raw);
+
+        assert_eq!(context_type, LlamaContextType::Unknown(raw));
+        assert_eq!(llama_cpp_sys_2::llama_context_type::from(context_type), raw);
+    }
+}

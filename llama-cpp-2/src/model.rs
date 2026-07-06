@@ -3,11 +3,11 @@ use std::ffi::{c_char, CStr, CString};
 use std::num::NonZeroU16;
 use std::os::raw::c_int;
 use std::path::Path;
-use std::ptr::{self, NonNull};
-use std::slice;
+use std::ptr::NonNull;
 use std::str::Utf8Error;
 
 use crate::context::params::LlamaContextParams;
+use crate::context::params::LlamaContextType;
 use crate::context::LlamaContext;
 use crate::llama_backend::LlamaBackend;
 use crate::model::params::LlamaModelParams;
@@ -812,6 +812,54 @@ impl LlamaModel {
         let context = NonNull::new(context).ok_or(LlamaContextLoadError::NullReturn)?;
 
         Ok(LlamaContext::new(self, context, params.embeddings()))
+    }
+
+    /// Create an MTP draft context linked to an existing target context.
+    ///
+    /// This is the safe entry point for setting llama.cpp's `ctx_other`
+    /// parameter: callers pass a live target context instead of a raw pointer.
+    ///
+    /// # Errors
+    ///
+    /// See [`LlamaContextLoadError`].
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn new_mtp_context<'a>(
+        &'a self,
+        backend: &LlamaBackend,
+        params: LlamaContextParams,
+        target_context: &mut LlamaContext<'a>,
+    ) -> Result<LlamaContext<'a>, LlamaContextLoadError> {
+        let mtp_params = params
+            .clone()
+            .with_context_type(LlamaContextType::Mtp)
+            .with_n_rs_seq(0)
+            .with_n_outputs_max(1);
+        if let Ok(context) = self.new_linked_context(backend, mtp_params, target_context) {
+            return Ok(context);
+        }
+
+        let fallback_params = params.with_n_rs_seq(0).with_n_outputs_max(1);
+        self.new_linked_context(backend, fallback_params, target_context)
+    }
+
+    fn new_linked_context<'a>(
+        &'a self,
+        _: &LlamaBackend,
+        params: LlamaContextParams,
+        target_context: &mut LlamaContext<'a>,
+    ) -> Result<LlamaContext<'a>, LlamaContextLoadError> {
+        let mut params = params;
+        params.context_params.ctx_other = target_context.context.as_ptr();
+        let embeddings = params.embeddings();
+        let context = unsafe {
+            llama_cpp_sys_2::llama_new_context_with_model(
+                self.model.as_ptr(),
+                params.context_params,
+            )
+        };
+        let context = NonNull::new(context).ok_or(LlamaContextLoadError::NullReturn)?;
+
+        Ok(LlamaContext::new(self, context, embeddings))
     }
 
     /// Apply the models chat template to some messages.
