@@ -1,6 +1,7 @@
 #include "wrapper_common.h"
 
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <memory>
@@ -156,6 +157,7 @@ struct llama_rs_mtp_speculative {
     std::vector<llama_token> prompt;
     std::vector<llama_token> draft;
     size_t last_draft_len = 0;
+    bool begun = false;
     bool draft_pending = false;
 };
 
@@ -186,13 +188,25 @@ static void llama_rs_assign_tokens(
     dst.assign(tokens, tokens + count);
 }
 
+static llama_rs_status llama_rs_mtp_speculative_reset(struct llama_rs_mtp_speculative * spec) {
+    auto * replacement = common_speculative_init(spec->params, 1);
+    if (!replacement) {
+        return LLAMA_RS_STATUS_ALLOCATION_FAILED;
+    }
+
+    common_speculative_free(spec->spec);
+    spec->spec = replacement;
+    return LLAMA_RS_STATUS_OK;
+}
+
 extern "C" struct llama_rs_mtp_speculative * llama_rs_mtp_speculative_init(
     struct llama_context * ctx_tgt,
     struct llama_context * ctx_dft,
     int32_t n_max,
     int32_t n_min,
     float p_min) {
-    if (!ctx_tgt || !ctx_dft || n_max <= 0 || n_min < 0 || n_min > n_max) {
+    if (!ctx_tgt || !ctx_dft || n_max <= 0 || n_max > UINT16_MAX || n_min < 0 || n_min > n_max ||
+        !std::isfinite(p_min) || p_min < 0.0f || p_min > 1.0f) {
         return nullptr;
     }
 
@@ -236,10 +250,16 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_begin(
     }
 
     try {
+        // llama.cpp's MTP begin hook does not clear per-request hidden-state carryover.
+        const auto reset_status = llama_rs_mtp_speculative_reset(spec);
+        if (reset_status != LLAMA_RS_STATUS_OK) {
+            return reset_status;
+        }
         llama_rs_assign_tokens(spec->prompt, prompt_tokens, prompt_tokens_count);
         spec->last_draft_len = 0;
         spec->draft_pending = false;
         common_speculative_begin(spec->spec, LLAMA_RS_MTP_SEQ_ID, spec->prompt);
+        spec->begun = true;
         return LLAMA_RS_STATUS_OK;
     } catch (...) {
         return LLAMA_RS_STATUS_EXCEPTION;
@@ -249,7 +269,7 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_begin(
 extern "C" llama_rs_status llama_rs_mtp_speculative_process(
     struct llama_rs_mtp_speculative * spec,
     const struct llama_batch * batch) {
-    if (!spec || !spec->spec || !batch) {
+    if (!spec || !spec->spec || !batch || !spec->begun) {
         return LLAMA_RS_STATUS_INVALID_ARGUMENT;
     }
     if (!llama_rs_mtp_batch_compatible(*batch)) {
@@ -271,11 +291,13 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_draft(
     llama_token id_last,
     const llama_token * prompt_tokens,
     size_t prompt_tokens_count,
+    uint16_t max_draft_tokens,
     llama_token * out_tokens,
     size_t out_tokens_capacity,
     size_t * out_tokens_count) {
     if (!spec || !spec->spec || (!prompt_tokens && prompt_tokens_count > 0) ||
-        !out_tokens_count || n_past < 0) {
+        !out_tokens_count || n_past < 0 || !spec->begun || max_draft_tokens == 0 ||
+        max_draft_tokens > spec->params.draft.n_max) {
         return LLAMA_RS_STATUS_INVALID_ARGUMENT;
     }
 
@@ -290,7 +312,7 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_draft(
         auto & params = common_speculative_get_draft_params(spec->spec, LLAMA_RS_MTP_SEQ_ID);
         params = {
             true,
-            spec->params.draft.n_max,
+            static_cast<int32_t>(max_draft_tokens),
             n_past,
             id_last,
             &spec->prompt,
@@ -320,7 +342,7 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_draft(
 extern "C" llama_rs_status llama_rs_mtp_speculative_accept(
     struct llama_rs_mtp_speculative * spec,
     uint16_t n_accepted) {
-    if (!spec || !spec->spec) {
+    if (!spec || !spec->spec || !spec->begun) {
         return LLAMA_RS_STATUS_INVALID_ARGUMENT;
     }
     if (!spec->draft_pending || n_accepted > spec->last_draft_len) {
