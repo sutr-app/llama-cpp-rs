@@ -1,8 +1,9 @@
 //! Experimental wrappers for llama.cpp speculative decoding helpers.
 //!
-//! MTP decoding follows this sequence: call [`MtpSpeculative::begin`], create
-//! a bounded draft, decode its tokens in the target context, process that
-//! target batch, then accept the number of tokens the target retained. A
+//! MTP decoding follows this sequence: call [`MtpSpeculative::reset`] for a
+//! new request, process target prefill batches, call [`MtpSpeculative::begin`],
+//! create a bounded draft, decode its tokens in the target context, process
+//! that target batch, then accept the number of tokens the target retained. A
 //! non-empty draft must be accepted before the next draft operation.
 
 use std::ptr::NonNull;
@@ -115,7 +116,25 @@ impl<'model> MtpSpeculative<'model> {
         &mut self.draft_context
     }
 
-    /// Begin a new generation from the given prompt tokens.
+    /// Reset speculative state before beginning a new request.
+    ///
+    /// This preserves the target and draft contexts, but recreates the
+    /// llama.cpp speculative helper so hidden-state carryover cannot cross
+    /// request boundaries. Call this before processing target prefill batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if llama.cpp cannot recreate the speculative helper.
+    pub fn reset(&mut self) -> Result<(), MtpSpeculativeError> {
+        let status = unsafe { llama_cpp_sys_2::llama_rs_mtp_speculative_reset(self.raw.as_ptr()) };
+        status_to_result(status)?;
+        self.state.reset();
+        Ok(())
+    }
+
+    /// Begin drafting after target prefill has been processed.
+    ///
+    /// Call [`Self::reset`] before processing a new request's prefill batches.
     ///
     /// # Errors
     ///
@@ -260,8 +279,17 @@ impl MtpSpeculativeState {
         };
     }
 
+    fn reset(&mut self) {
+        *self = Self::New {
+            n_max: self.n_max(),
+        };
+    }
+
     fn process(&self) -> Result<(), MtpSpeculativeError> {
-        if matches!(self, Self::Ready { .. } | Self::DraftPending { .. }) {
+        if matches!(
+            self,
+            Self::New { .. } | Self::Ready { .. } | Self::DraftPending { .. }
+        ) {
             Ok(())
         } else {
             Err(MtpSpeculativeError::InvalidState)
@@ -339,10 +367,10 @@ mod tests {
     }
 
     #[test]
-    fn state_requires_begin_before_process_or_draft() {
+    fn state_allows_prefill_processing_but_requires_begin_before_draft() {
         let state = MtpSpeculativeState::new(3);
 
-        assert_eq!(state.process(), Err(MtpSpeculativeError::InvalidState));
+        assert_eq!(state.process(), Ok(()));
         assert_eq!(state.draft(1), Err(MtpSpeculativeError::InvalidState));
     }
 
@@ -395,15 +423,18 @@ mod tests {
     }
 
     #[test]
-    fn begin_discards_a_previous_request_pending_draft() {
+    fn reset_discards_a_previous_request_pending_draft() {
         let mut state = MtpSpeculativeState::new(3);
         state.begin();
         state.draft(2).unwrap();
         state.draft_completed(2);
 
-        state.begin();
+        state.reset();
 
         assert_eq!(state.accept(2), Err(MtpSpeculativeError::InvalidState));
+        assert_eq!(state.draft(3), Err(MtpSpeculativeError::InvalidState));
+        assert_eq!(state.process(), Ok(()));
+        state.begin();
         assert_eq!(state.draft(3), Ok(()));
     }
 }

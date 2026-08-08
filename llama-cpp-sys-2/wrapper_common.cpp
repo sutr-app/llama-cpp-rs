@@ -188,17 +188,6 @@ static void llama_rs_assign_tokens(
     dst.assign(tokens, tokens + count);
 }
 
-static llama_rs_status llama_rs_mtp_speculative_reset(struct llama_rs_mtp_speculative * spec) {
-    auto * replacement = common_speculative_init(spec->params, 1);
-    if (!replacement) {
-        return LLAMA_RS_STATUS_ALLOCATION_FAILED;
-    }
-
-    common_speculative_free(spec->spec);
-    spec->spec = replacement;
-    return LLAMA_RS_STATUS_OK;
-}
-
 extern "C" struct llama_rs_mtp_speculative * llama_rs_mtp_speculative_init(
     struct llama_context * ctx_tgt,
     struct llama_context * ctx_dft,
@@ -241,6 +230,36 @@ extern "C" void llama_rs_mtp_speculative_free(struct llama_rs_mtp_speculative * 
     delete spec;
 }
 
+extern "C" llama_rs_status llama_rs_mtp_speculative_reset(
+    struct llama_rs_mtp_speculative * spec) {
+    if (!spec || !spec->spec) {
+        return LLAMA_RS_STATUS_INVALID_ARGUMENT;
+    }
+
+    try {
+        // The helper destructor detaches its backend sampler from ctx_dft.
+        // Destroy it before constructing the replacement so it cannot detach
+        // the sampler that the replacement installs on the same context.
+        common_speculative_free(spec->spec);
+        spec->spec = nullptr;
+
+        auto * replacement = common_speculative_init(spec->params, 1);
+        if (!replacement) {
+            return LLAMA_RS_STATUS_ALLOCATION_FAILED;
+        }
+
+        spec->spec = replacement;
+        spec->prompt.clear();
+        spec->draft.clear();
+        spec->last_draft_len = 0;
+        spec->begun = false;
+        spec->draft_pending = false;
+        return LLAMA_RS_STATUS_OK;
+    } catch (...) {
+        return LLAMA_RS_STATUS_EXCEPTION;
+    }
+}
+
 extern "C" llama_rs_status llama_rs_mtp_speculative_begin(
     struct llama_rs_mtp_speculative * spec,
     const llama_token * prompt_tokens,
@@ -250,11 +269,6 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_begin(
     }
 
     try {
-        // llama.cpp's MTP begin hook does not clear per-request hidden-state carryover.
-        const auto reset_status = llama_rs_mtp_speculative_reset(spec);
-        if (reset_status != LLAMA_RS_STATUS_OK) {
-            return reset_status;
-        }
         llama_rs_assign_tokens(spec->prompt, prompt_tokens, prompt_tokens_count);
         spec->last_draft_len = 0;
         spec->draft_pending = false;
@@ -269,7 +283,7 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_begin(
 extern "C" llama_rs_status llama_rs_mtp_speculative_process(
     struct llama_rs_mtp_speculative * spec,
     const struct llama_batch * batch) {
-    if (!spec || !spec->spec || !batch || !spec->begun) {
+    if (!spec || !spec->spec || !batch) {
         return LLAMA_RS_STATUS_INVALID_ARGUMENT;
     }
     if (!llama_rs_mtp_batch_compatible(*batch)) {
