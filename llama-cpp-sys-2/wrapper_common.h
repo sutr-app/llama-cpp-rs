@@ -84,6 +84,7 @@ llama_rs_status llama_rs_mtp_speculative_draft(
     llama_token id_last,
     const llama_token * prompt_tokens,
     size_t prompt_tokens_count,
+    uint16_t max_draft_tokens,
     llama_token * out_tokens,
     size_t out_tokens_capacity,
     size_t * out_tokens_count);
