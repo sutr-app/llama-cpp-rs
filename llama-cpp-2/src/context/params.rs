@@ -320,3 +320,17 @@ impl Default for LlamaContextParams {
         Self { context_params }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::LlamaContextParams;
+
+    #[test]
+    fn outputs_max_setter_round_trips_normal_and_boundary_values() {
+        let params = LlamaContextParams::default().with_n_outputs_max(7);
+        assert_eq!(params.n_outputs_max(), 7);
+
+        let params = params.with_n_outputs_max(0);
+        assert_eq!(params.n_outputs_max(), 0);
+    }
+}

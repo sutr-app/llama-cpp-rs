@@ -4,6 +4,8 @@ use std::fmt::{Debug, Formatter};
 use std::num::NonZeroI32;
 use std::ptr::NonNull;
 use std::slice;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::llama_batch::LlamaBatch;
 use crate::model::{LlamaLoraAdapter, LlamaModel};
@@ -31,6 +33,8 @@ pub struct LlamaContext<'a> {
     embeddings_enabled: bool,
     /// Backend samplers kept alive for the context's lifetime.
     _backend_samplers: Vec<(i32, LlamaSampler)>,
+    /// Keeps the abort callback data alive while it is registered in llama.cpp.
+    abort_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Debug for LlamaContext<'_> {
@@ -53,6 +57,7 @@ impl<'model> LlamaContext<'model> {
             initialized_logits: Vec::new(),
             embeddings_enabled,
             _backend_samplers: Vec::new(),
+            abort_flag: None,
         }
     }
 
@@ -68,7 +73,38 @@ impl<'model> LlamaContext<'model> {
             initialized_logits: Vec::new(),
             embeddings_enabled,
             _backend_samplers: backend_samplers,
+            abort_flag: None,
         }
+    }
+
+    /// Install an abort flag polled by the compute graph.
+    ///
+    /// The flag remains owned by this context until [`Self::clear_abort_callback`]
+    /// is called or the context is dropped, keeping the callback data valid for
+    /// any in-flight decode or encode operation.
+    pub fn set_abort_flag(&mut self, flag: Arc<AtomicBool>) {
+        let stored = self.abort_flag.insert(flag);
+        let data = Arc::as_ptr(stored).cast_mut().cast();
+
+        unsafe {
+            llama_cpp_sys_2::llama_set_abort_callback(
+                self.context.as_ptr(),
+                Some(abort_callback_trampoline),
+                data,
+            );
+        }
+    }
+
+    /// Remove any previously installed abort callback.
+    pub fn clear_abort_callback(&mut self) {
+        unsafe {
+            llama_cpp_sys_2::llama_set_abort_callback(
+                self.context.as_ptr(),
+                None,
+                std::ptr::null_mut(),
+            );
+        }
+        self.abort_flag = None;
     }
 
     /// Gets the max number of logical tokens that can be submitted to decode. Must be greater than or equal to [`Self::n_ubatch`].
@@ -428,6 +464,34 @@ impl<'model> LlamaContext<'model> {
 
 impl Drop for LlamaContext<'_> {
     fn drop(&mut self) {
+        if self.abort_flag.is_some() {
+            self.clear_abort_callback();
+        }
         unsafe { llama_cpp_sys_2::llama_free(self.context.as_ptr()) }
+    }
+}
+
+/// Read the abort flag supplied to llama.cpp's C callback.
+unsafe extern "C" fn abort_callback_trampoline(data: *mut std::os::raw::c_void) -> bool {
+    let flag = unsafe { &*(data as *const AtomicBool) };
+    flag.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::abort_callback_trampoline;
+
+    #[test]
+    fn abort_callback_reads_the_shared_flag() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let data = Arc::as_ptr(&flag).cast_mut().cast();
+
+        assert!(!unsafe { abort_callback_trampoline(data) });
+
+        flag.store(true, Ordering::Relaxed);
+        assert!(unsafe { abort_callback_trampoline(data) });
     }
 }

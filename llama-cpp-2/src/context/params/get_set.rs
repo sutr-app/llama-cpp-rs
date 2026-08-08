@@ -145,6 +145,19 @@ impl LlamaContextParams {
         self.context_params.n_rs_seq
     }
 
+    /// Set the maximum number of output rows retained by the context.
+    #[must_use]
+    pub fn with_n_outputs_max(mut self, n_outputs_max: u32) -> Self {
+        self.context_params.n_outputs_max = n_outputs_max;
+        self
+    }
+
+    /// Get the maximum number of output rows retained by the context.
+    #[must_use]
+    pub fn n_outputs_max(&self) -> u32 {
+        self.context_params.n_outputs_max
+    }
+
     /// Set the llama.cpp context type.
     #[must_use]
     pub fn with_context_type(mut self, context_type: LlamaContextType) -> Self {
