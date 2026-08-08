@@ -69,6 +69,8 @@ struct llama_rs_mtp_speculative * llama_rs_mtp_speculative_init(
 
 void llama_rs_mtp_speculative_free(struct llama_rs_mtp_speculative * spec);
 
+llama_rs_status llama_rs_mtp_speculative_reset(struct llama_rs_mtp_speculative * spec);
+
 llama_rs_status llama_rs_mtp_speculative_begin(
     struct llama_rs_mtp_speculative * spec,
     const llama_token * prompt_tokens,
