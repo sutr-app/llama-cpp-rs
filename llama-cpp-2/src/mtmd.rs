@@ -764,11 +764,81 @@ impl MtmdInputChunks {
             Err(MtmdEvalError::EvalFailure(result))
         }
     }
+
+    /// Evaluate a single chunk by index, starting from position `n_past`.
+    ///
+    /// Like [`Self::eval_chunks`] but for one chunk, enabling partial prefill
+    /// (for example, reusing a KV-cache prefix and evaluating only differing
+    /// suffix chunks).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MtmdEvalError::EvalFailure` on an out-of-range index or if
+    /// encoding or decoding fails.
+    ///
+    /// This function is NOT thread-safe.
+    pub fn eval_chunk(
+        &self,
+        index: usize,
+        mtmd_ctx: &MtmdContext,
+        llama_ctx: &LlamaContext,
+        n_past: llama_cpp_sys_2::llama_pos,
+        seq_id: llama_cpp_sys_2::llama_seq_id,
+        n_batch: i32,
+        logits_last: bool,
+    ) -> Result<llama_cpp_sys_2::llama_pos, MtmdEvalError> {
+        validate_chunk_index(self.len(), index)?;
+
+        let chunk_ptr =
+            unsafe { llama_cpp_sys_2::mtmd_input_chunks_get(self.chunks.as_ptr(), index) };
+
+        // The helper adds text token counts to `new_n_past`, so seed it with
+        // the caller's current position to preserve the absolute position.
+        let mut new_n_past = n_past;
+        let result = unsafe {
+            llama_cpp_sys_2::mtmd_helper_eval_chunk_single(
+                mtmd_ctx.context.as_ptr(),
+                llama_ctx.context.as_ptr(),
+                chunk_ptr,
+                n_past,
+                seq_id,
+                n_batch,
+                logits_last,
+                &raw mut new_n_past,
+            )
+        };
+
+        if result == 0 {
+            Ok(new_n_past)
+        } else {
+            Err(MtmdEvalError::EvalFailure(result))
+        }
+    }
+}
+
+fn validate_chunk_index(chunk_count: usize, index: usize) -> Result<(), MtmdEvalError> {
+    if index < chunk_count {
+        Ok(())
+    } else {
+        Err(MtmdEvalError::EvalFailure(-1))
+    }
 }
 
 impl Drop for MtmdInputChunks {
     fn drop(&mut self) {
         unsafe { llama_cpp_sys_2::mtmd_input_chunks_free(self.chunks.as_ptr()) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_chunk_index;
+
+    #[test]
+    fn input_chunks_index_boundary_is_checked_before_evaluation() {
+        assert!(validate_chunk_index(1, 0).is_ok());
+        assert!(validate_chunk_index(0, 0).is_err());
+        assert!(validate_chunk_index(1, 1).is_err());
     }
 }
 
