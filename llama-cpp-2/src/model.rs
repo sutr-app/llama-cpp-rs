@@ -304,6 +304,20 @@ impl LlamaModel {
         str: &str,
         add_bos: AddBos,
     ) -> Result<Vec<LlamaToken>, StringToTokenError> {
+        self.str_to_token_with_special(str, add_bos, true)
+    }
+
+    /// Convert a string to tokens while choosing whether tokenizer special
+    /// tokens embedded in the input should be parsed.
+    ///
+    /// Existing callers should normally use [`Self::str_to_token`], whose
+    /// special-token behavior remains unchanged.
+    pub fn str_to_token_with_special(
+        &self,
+        str: &str,
+        add_bos: AddBos,
+        parse_special: bool,
+    ) -> Result<Vec<LlamaToken>, StringToTokenError> {
         let add_bos = match add_bos {
             AddBos::Always => true,
             AddBos::Never => false,
@@ -324,7 +338,7 @@ impl LlamaModel {
                 buffer.as_mut_ptr().cast::<llama_cpp_sys_2::llama_token>(),
                 buffer_capacity,
                 add_bos,
-                true,
+                parse_special,
             )
         };
 
@@ -340,7 +354,7 @@ impl LlamaModel {
                     buffer.as_mut_ptr().cast::<llama_cpp_sys_2::llama_token>(),
                     -size,
                     add_bos,
-                    true,
+                    parse_special,
                 )
             }
         } else {
